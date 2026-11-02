@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Configure a QinHeng CH343P's USB descriptors stored in on-chip EEPROM.
+
+Reads the existing EEPROM, applies the requested VID, PID, and string
+descriptors, writes it back, and verifies every byte. Fields that are not
+requested keep their current values. New values take effect on the next
+power-up of the chip.
+
+Only CH343P has EEPROM-based configuration. The device must be writable,
+usually via root. Works against the CDC-ACM (ttyACM) device directly; no
+vendor VCP driver is required.
+
+Examples:
+    ch343-set-config --vid 1a86 --pid 55d3 --product "ESP-Mosaico"
+    ch343-set-config --manufacturer Espressif --product ESP-Mosaico
+"""
+
+import argparse
+import ctypes
+import fcntl
+import os
+import sys
+import time
+from pathlib import Path
+
+USBDEVFS_CONTROL = 0xC0185500
+EEP_LEN = 0x78
+SERIAL_OFF = 0x10
+PRODUCT_OFF = 0x28
+MFR_OFF = 0x50
+MAX_STR_CHARS = 18
+
+
+class Ctrl(ctypes.Structure):
+    _fields_ = [
+        ("bRequestType", ctypes.c_uint8),
+        ("bRequest", ctypes.c_uint8),
+        ("wValue", ctypes.c_uint16),
+        ("wIndex", ctypes.c_uint16),
+        ("wLength", ctypes.c_uint16),
+        ("timeout", ctypes.c_uint32),
+        ("data", ctypes.c_void_p),
+    ]
+
+
+def control(fd, request_type, request, value, index, data=b"", length=0):
+    buf = ctypes.create_string_buffer(bytes(data), max(len(data), length, 1))
+    c = Ctrl(request_type, request, value, index, length, 1000,
+             ctypes.cast(buf, ctypes.c_void_p))
+    n = fcntl.ioctl(fd, USBDEVFS_CONTROL, c)
+    if n < 0:
+        raise OSError("USB control transfer failed")
+    return buf.raw[:n] if request_type & 0x80 else n
+
+
+def eep_read(fd, off):
+    return control(fd, 0xC0, 0x54, (off & 0xFF) << 8, 0xA001, length=1)[0]
+
+
+def eep_write(fd, off, byte):
+    control(fd, 0x40, 0x54, ((off & 0xFF) << 8) | byte, 0xA001)
+    control(fd, 0x40, 0x5E, 0x000A, 0)
+    time.sleep(0.001)
+
+
+def find_device(vid, pid):
+    for p in Path("/sys/bus/usb/devices").iterdir():
+        try:
+            if (p / "idVendor").read_text().strip() != f"{vid:04x}":
+                continue
+            if (p / "idProduct").read_text().strip() != f"{pid:04x}":
+                continue
+            bus = int((p / "busnum").read_text())
+            dev = int((p / "devnum").read_text())
+        except (OSError, ValueError):
+            continue
+        return f"/dev/bus/usb/{bus:03d}/{dev:03d}"
+    return None
+
+
+def put_string(img, offset, text, enable_flag):
+    """Store a UTF-16 string descriptor and set its enable bit in bCfg."""
+    raw = text.encode("ascii")
+    if len(raw) > MAX_STR_CHARS:
+        sys.exit(f"string '{text}' is {len(raw)} chars; limit is {MAX_STR_CHARS}")
+    block = bytearray(0x28)
+    block[0] = block[1] = (len(raw) + 1) * 2
+    block[2] = 0x03
+    for i, b in enumerate(raw):
+        block[3 + i * 2] = b
+    img[offset:offset + 0x28] = block
+    img[2] |= enable_flag
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Set VID, PID, and USB strings in a CH343P EEPROM. "
+                    "Fields that are not given keep their current values.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    ap.add_argument("--vid", type=lambda s: int(s, 16), help="new Vendor ID (hex)")
+    ap.add_argument("--pid", type=lambda s: int(s, 16), help="new Product ID (hex)")
+    ap.add_argument("--manufacturer", help="manufacturer string (<=18 chars)")
+    ap.add_argument("--product", help="product string (<=18 chars)")
+    ap.add_argument("--serial", help="serial string (<=10 chars)")
+    ap.add_argument("--match-vid", type=lambda s: int(s, 16), default=0x1A86,
+                    help="current VID used to find the device")
+    ap.add_argument("--match-pid", type=lambda s: int(s, 16), default=0x55D3,
+                    help="current PID used to find the device")
+    ap.add_argument("--device", help="USB node path; overrides the search")
+    args = ap.parse_args()
+
+    if args.vid is None and args.pid is None and args.manufacturer is None \
+            and args.product is None and args.serial is None:
+        ap.error("nothing to change; pass at least one option")
+
+    node = args.device or find_device(args.match_vid, args.match_pid)
+    if not node:
+        sys.exit(f"No device {args.match_vid:04x}:{args.match_pid:04x} found on the USB bus")
+    print(f"device: {node}")
+
+    fd = os.open(node, os.O_RDWR)
+    img = bytearray(eep_read(fd, i) for i in range(EEP_LEN))
+    if img[0] != 0x53 or img[1] != 0x23:
+        sys.exit("EEPROM has not been configured with CH34xSerCfg yet")
+
+    cur_vid = img[4] | (img[5] << 8)
+    cur_pid = img[6] | (img[7] << 8)
+    print(f"current: {cur_vid:04x}:{cur_pid:04x}")
+
+    if args.vid is not None:
+        if not (1 <= args.vid <= 0xFFFE):
+            sys.exit("VID must be between 0001 and FFFE")
+        img[4], img[5] = args.vid & 0xFF, args.vid >> 8
+    if args.pid is not None:
+        if not (1 <= args.pid <= 0xFFFE):
+            sys.exit("PID must be between 0001 and FFFE")
+        img[6], img[7] = args.pid & 0xFF, args.pid >> 8
+    if args.manufacturer is not None:
+        put_string(img, MFR_OFF, args.manufacturer, 0x20)
+    if args.product is not None:
+        put_string(img, PRODUCT_OFF, args.product, 0x40)
+    if args.serial is not None:
+        if len(args.serial) > 10:
+            sys.exit("serial string is limited to 10 chars")
+        put_string(img, SERIAL_OFF, args.serial, 0x80)
+
+    for i, b in enumerate(img):
+        eep_write(fd, i, b)
+    readback = bytearray(eep_read(fd, i) for i in range(EEP_LEN))
+    if readback != img:
+        for i, (a, b) in enumerate(zip(img, readback)):
+            if a != b:
+                sys.exit(f"verify failed at 0x{i:02x}: wrote {a:02x}, read {b:02x}")
+    print("verify ok")
+    print("Unplug and replug the device for the new descriptors to enumerate.")
+    os.close(fd)
+
+
+if __name__ == "__main__":
+    main()
