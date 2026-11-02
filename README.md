@@ -9,6 +9,17 @@ The CH343P enumerates as a standard CDC-ACM port (`/dev/ttyACM*`), so the
 stock Linux `cdc_acm` driver is sufficient for everything below. The vendor
 VCP driver sources are kept in `driver/` for reference but are not needed.
 
+## Contents
+
+- [USB descriptor configuration (CH343P only)](#usb-descriptor-configuration-ch343p-only)
+  - [Which driver to use](#which-driver-to-use)
+  - [Usage](#usage)
+  - [Notes](#notes)
+- [Test records](#test-records)
+  - [Environment](#environment)
+  - [Auto-download (esptool DTR/RTS reset) test](#auto-download-esptool-dtrrts-reset-test)
+  - [Flash write-speed vs. baud rate](#flash-write-speed-vs-baud-rate)
+
 ## USB descriptor configuration (CH343P only)
 
 The CH343P has on-chip EEPROM that stores its USB VID, PID, and the
@@ -125,6 +136,7 @@ connect, stub upload, verify and reset.
 
 | baud | runs | result | write time (s) | effective speed (kbit/s) |
 | --- | --- | --- | --- | --- |
+| 6000000 | 3 | 3/3 PASS | 54.1 / 53.6 / 53.7 | 1240.9 / 1251.2 / 1250.0 |
 | 4000000 | 3 | 3/3 PASS | 49.5 / 59.3 / 58.3 | 1355.9 / 1131.8 / 1151.3 |
 | 2000000 | 2 | 2/2 PASS | 76.1 / 75.5 | 881.4 / 888.6 |
 | 1152000 | 3 | 0/3 FAIL | — | — |
@@ -132,15 +144,18 @@ connect, stub upload, verify and reset.
 
 Findings:
 
+- **6000000 (the CH343P's maximum rated baud) works reliably** — 3/3 runs
+  verified, and it is not faster than 4000000 in practice: at these rates
+  flash erase time and protocol overhead dominate (at 4-6 Mbaud only ~15-20 s
+  of the ~50-55 s write time is actual UART transfer), so effective
+  throughput saturates around 1.2-1.35 Mbit/s no matter how high the baud
+  goes. 2000000 is the most robust "fast" setting; 4000000/6000000 are
+  equally usable if you want the headline number.
 - **1152000 does not work on this link** — deterministic failure right after
   `Changing baud rate to 1152000... Changed.`, the stub then cannot be
-  reached (`Unable to verify flash chip connection`). Suspected clock
-  divider mismatch: the ESP32-S31 download-mode UART runs from the 40 MHz
-  XTAL, so 1152000 requires divider 34.72 -> 35, i.e. an actual 1142857
-  baud (-0.8 %), which combined with the adapter-side divider error exceeds
-  the link margin. Baud rates that divide the crystal cleanly (4000000,
-  2000000) or nearly (460800, -0.18 %) are reliable.
-- Effective throughput saturates above 2000000 baud: at 4 Mbaud the 8 MB
-  write takes ~50-59 s of which only ~21 s is UART transfer — flash erase
-  time and protocol overhead dominate. 2000000 is the most robust
-  "fast" setting; 4000000 is the fastest and passed 3/3 here.
+  reached (`Unable to verify flash chip connection`). Notably 6000000 — also
+  a non-integer divider from the 40 MHz XTAL (6.67, ≈ -0.3 % with the
+  fractional divider) — works fine, so a plain crystal-divider mismatch on
+  the ESP side does not explain it; the failure is specific to the 1152000
+  setting on this CH343P + cdc_acm link. Use 2000000 or 4000000 instead —
+  both are faster in practice anyway.
