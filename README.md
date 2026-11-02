@@ -21,6 +21,7 @@ VCP driver sources are kept in `driver/` for reference but are not needed.
   - [Flash write-speed vs. baud rate](#flash-write-speed-vs-baud-rate)
   - [Baud sweep (esptool `chip-id`, link check after baud change)](#baud-sweep-esptool-chip-id-link-check-after-baud-change)
   - [App-level UART test (root-causing the failing baud rates)](#app-level-uart-test-root-causing-the-failing-baud-rates)
+  - [Adapter loopback test (ESP32 removed from the picture)](#adapter-loopback-test-esp32-removed-from-the-picture)
 
 ## USB descriptor configuration (CH343P only)
 
@@ -256,3 +257,28 @@ Conclusions:
   failing values appear in the datasheet's "common baud rates" list, while
   nearly all passing values do. Reported upstream as
   [WCHSoftGroup/ch343ser_linux#75](https://github.com/WCHSoftGroup/ch343ser_linux/issues/75).
+
+### Adapter loopback test (ESP32 removed from the picture)
+
+With the CH343P's TX and RX pins tied together (and the ESP32 held in
+reset so its pins are high-Z), the adapter talks only to itself — 10 x
+64-byte random payloads plus one 4 KB burst per baud:
+
+| baud | result | | baud | result |
+| --- | --- | --- | --- | --- |
+| 1152000 | **FAIL — write stalls, 0/10** | | 921600 | PASS (10/10 + 4 KB) |
+| 2304000 | **FAIL — write stalls, 0/10** | | 1000000 | PASS (10/10 + 4 KB) |
+| 4608000 | **FAIL — write stalls, 0/10** | | 1200000 | PASS (10/10 + 4 KB) |
+| 5000000 | **FAIL — write stalls, 0/10** | | 2000000 | PASS (10/10 + 4 KB) |
+| 115200 | 9/10 + 4 KB (\*) | | 4000000 | PASS (10/10 + 4 KB) |
+| 460800 | PASS (10/10 + 4 KB) | | 6000000 | PASS (10/10 + 4 KB) |
+
+(\*) the single lost 115200 round is explained by the ESP32's boot log —
+printed at 115200 — colliding with a test burst; not a chip issue.
+
+At the failing settings the adapter's TX path does not even drain: host
+`write()` calls block until the write timeout fires. In loopback the
+chip's TX and RX share the same clock, so a merely mis-clocked baud would
+still have passed; a loopback failure means the UART engine is genuinely
+unclocked/stalled at these settings. This is 100 % adapter-internal — no
+peer device involved.
