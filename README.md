@@ -1,27 +1,13 @@
-# ch343 linux serial driver
-## Description
+# CH343P debug adapter for ESP-Mosaico
 
-USB to UART(s) chip CH342/CH343/CH344/CH346/CH347/CH9101/CH9102/CH9103/CH9104/CH9105/CH9111/CH9114/CH9433 are fully compliant to the  Communications Device Class (CDC) standard(Except CH9433), they will work with a standard CDC-ACM driver (CDC - Abstract Control Model). Linux operating systems supply a default CDC-ACM driver that can be used with these USB UART devices. In Linux, this driver file name is cdc-acm.
+This repository documents a CH343P-based driverless USB-UART debug adapter
+used with an ESP32-S31 target (ESP-Mosaico core board): the EEPROM
+configuration tool `ch343-set-config`, and the test records collected with
+the adapter (auto-download, flash write-speed vs. baud rate).
 
-The CDC-ACM driver has limited capabilities to control specific devices. This generic driver does not have any knowledge about specific device protocols. Because of this, device manufacturers can create an alternate, or custom driver that is capable of accessing the device specific function sets, such as hardware flow control or GPIO functions.
-
-If you use this VCP driver, please check that the CDC-ACM driver was not installed for the USB UART devices mentioned above. You can use command "ls /dev/ttyACM*" to confirm that, to remove the CDC-ACM driver, use command "rmmod cdc-acm".
-
-This driver supports USB to single serial port chip CH343/CH346/CH347/CH9101/CH9102/CH9111/CH9433, USB to dual serial ports chip CH342/CH346/CH347/CH9103, USB to quad serial ports chip CH344, CH9104, CH9105, CH9114, etc.
-
-1. Open "Terminal"
-2. Switch to "driver" directory
-3. Compile the driver using "make", you will see the module "ch343.ko" if successful
-4. Type "sudo make load" or "sudo insmod ch343.ko" to load the driver dynamically
-5. Type "sudo make unload" or "sudo rmmod ch343.ko" to unload the driver
-6. Type "sudo make install" to make the driver work permanently
-7. Type "sudo make uninstall" to remove the driver
-8. You can refer to the link below to acquire uart application, you can use gcc or Cross-compile with cross-gcc
-   https://github.com/WCHSoftGroup/tty_uart
-
-Before the driver works, you should make sure that the usb device has been plugged in and is working properly, you can use shell command "lsusb" or "dmesg" to confirm that, USB VID of these devices are [1a86], you can view all IDs from the id table which defined in "ch343.c".
-
-If the device works well, the driver will create tty devices named "ttyCH343USBx" in /dev directory, at the same time the driver will create "ch343_iodevx" node for chips that support GPIO signals. Operating the device in the /dev directory under Linux requires root permission by default, if users want to access the device in a non root mode, they can create udev rule file related to the device.
+The CH343P enumerates as a standard CDC-ACM port (`/dev/ttyACM*`), so the
+stock Linux `cdc_acm` driver is sufficient for everything below. The vendor
+VCP driver sources are kept in `driver/` for reference but are not needed.
 
 ## USB descriptor configuration (CH343P only)
 
@@ -88,7 +74,73 @@ lsusb -v -d 1a86:55d3 | grep -E 'iManufacturer|iProduct|iSerial'
   configuration; only the CH343P does.
 - A USB VID is registered with USB-IF and owned by its vendor. Only write a
   VID/PID you are authorized to use.
+- If the CH343P's RTS pin is pulled low while the chip powers up, the EEPROM
+  configuration is ignored and the chip enumerates with the factory strings
+  ("USB Single Serial"). Keep the auto-download circuit from loading RTS
+  during adapter power-up if you rely on custom strings.
 
-## Note
+## Test records
 
-Any question, you can send feedback to mail: tech@wch.cn
+### Environment
+
+| item | value |
+| --- | --- |
+| Adapter | QinHeng CH343P, VID:PID `1a86:55d3`, on `/dev/ttyACM0` (cdc_acm) |
+| Target | ESP32-S31 rev v0.0 (ESP-Mosaico core board V0.3), 40 MHz crystal |
+| Flash | GD `c8 4018`, 16 MB |
+| Wiring | adapter TX/RX -> S31 UART0 RX0/TX0, DTR# -> BOOT, RTS# -> EN, GND; direct connection, no transistor pair |
+| Host | Linux 6.x, esptool v5.6.0 (ESP-IDF v6.2-dev) |
+| Date | 2026-11-02 |
+
+### Auto-download (esptool DTR/RTS reset) test
+
+esptool's standard reset sequence was driven through the CH343P handshake
+lines: DTR# -> BOOT, RTS# -> EN, connected **directly** (the two-transistor
+DevKitC circuit is only needed for chips that assert both lines low on port
+open, e.g. CH340/CP2102; the CH343 family does not). A 1-10 µF capacitor on
+EN to GND is required so BOOT is sampled low when the chip comes out of
+reset.
+
+| test | command | result |
+| --- | --- | --- |
+| Auto-enter download mode | `esptool --chip esp32s31 -p /dev/ttyACM0 chip-id` | PASS — connects on first attempt, chip/MAC read correctly |
+| Flash + auto reset back to app | `idf.py -p /dev/ttyACM0 flash` | PASS — write + verify OK, ends with "Hard resetting via RTS pin..." |
+| Application output (monitor) | RTS pulse reset, read @115200 | PASS — full ROM + 2nd-stage bootloader + app boot log received |
+| eFuse read | `espefuse --chip esp32s31 -p /dev/ttyACM0 summary` | PASS |
+
+Note: the ESP-Mosaico board has a manual on/off power controller (SAM8108).
+If esptool reports `Failed to connect ... No serial data received`, first
+check the board is actually powered on — plugging in USB does not power the
+board up by itself.
+
+### Flash write-speed vs. baud rate
+
+Method: write an 8 MB image of random data to flash offset `0x800000`
+(random data defeats esptool compression, so numbers reflect near-raw UART
+throughput). Two different images were alternated on consecutive runs so the
+diff-flash mechanism could not skip unchanged sectors. Every successful run
+ended with `Hash of data verified.` Write time is esptool's own "Wrote ...
+in T seconds" figure and includes flash erase; wall clock adds ~12 s for
+connect, stub upload, verify and reset.
+
+| baud | runs | result | write time (s) | effective speed (kbit/s) |
+| --- | --- | --- | --- | --- |
+| 4000000 | 3 | 3/3 PASS | 49.5 / 59.3 / 58.3 | 1355.9 / 1131.8 / 1151.3 |
+| 2000000 | 2 | 2/2 PASS | 76.1 / 75.5 | 881.4 / 888.6 |
+| 1152000 | 3 | 0/3 FAIL | — | — |
+| 460800 | 2 | 2/2 PASS | 197.2 / 197.8 | 340.4 / 339.2 |
+
+Findings:
+
+- **1152000 does not work on this link** — deterministic failure right after
+  `Changing baud rate to 1152000... Changed.`, the stub then cannot be
+  reached (`Unable to verify flash chip connection`). Suspected clock
+  divider mismatch: the ESP32-S31 download-mode UART runs from the 40 MHz
+  XTAL, so 1152000 requires divider 34.72 -> 35, i.e. an actual 1142857
+  baud (-0.8 %), which combined with the adapter-side divider error exceeds
+  the link margin. Baud rates that divide the crystal cleanly (4000000,
+  2000000) or nearly (460800, -0.18 %) are reliable.
+- Effective throughput saturates above 2000000 baud: at 4 Mbaud the 8 MB
+  write takes ~50-59 s of which only ~21 s is UART transfer — flash erase
+  time and protocol overhead dominate. 2000000 is the most robust
+  "fast" setting; 4000000 is the fastest and passed 3/3 here.
