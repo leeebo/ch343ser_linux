@@ -252,4 +252,7 @@ Conclusions:
 - This is a CH343P (firmware bcdDevice 4.45) baud-generator bug triggered
   by specific requested values: 1152000 and its multiples 2304000/4608000,
   plus 5000000. The esptool failures at these rates (`No serial data
-  received` right after `Changed.`) are fully explained by it.
+  received` right after `Changed.`) are fully explained by it. None of the
+  failing values appear in the datasheet's "common baud rates" list, while
+  nearly all passing values do. Reported upstream as
+  [WCHSoftGroup/ch343ser_linux#75](https://github.com/WCHSoftGroup/ch343ser_linux/issues/75).
