@@ -98,11 +98,11 @@ def main():
                     "Fields that are not given keep their current values.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    ap.add_argument("--vid", type=lambda s: int(s, 16), help="new Vendor ID (hex)")
-    ap.add_argument("--pid", type=lambda s: int(s, 16), help="new Product ID (hex)")
-    ap.add_argument("--manufacturer", help="manufacturer string (<=18 chars)")
-    ap.add_argument("--product", help="product string (<=18 chars)")
-    ap.add_argument("--serial", help="serial string (<=10 chars)")
+    ap.add_argument("-V", "--vid", type=lambda s: int(s, 16), help="new Vendor ID (hex)")
+    ap.add_argument("-P", "--pid", type=lambda s: int(s, 16), help="new Product ID (hex)")
+    ap.add_argument("-m", "--manufacturer", help="manufacturer string (<=18 chars)")
+    ap.add_argument("-p", "--product", help="product string (<=18 chars)")
+    ap.add_argument("-s", "--serial", help="serial string (<=10 chars)")
     ap.add_argument("--match-vid", type=lambda s: int(s, 16), default=0x1A86,
                     help="current VID used to find the device")
     ap.add_argument("--match-pid", type=lambda s: int(s, 16), default=0x55D3,
