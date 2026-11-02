@@ -184,10 +184,11 @@ An ESP-side crystal-divider mismatch is **ruled out** as the root cause:
 5000000 divides the 40 MHz XTAL exactly yet always fails, while 6000000
 (-0.31 %) and 3000000 (+0.16 %) pass. The failures are specific to the
 1152000 and 5000000 settings on this CH343P (firmware bcdDevice 4.45) +
-Linux `cdc_acm` link — i.e. the adapter mis-programs these two rates. The
-adapter recovers cleanly: the next connection at any working rate succeeds
-immediately after a failure. Avoid 1152000/5000000; use 2000000, 4000000
-or 6000000.
+Linux `cdc_acm` link — i.e. the adapter mis-programs these rates (the
+app-level cross test below extends the broken set to 2304000 and 4608000).
+The adapter recovers cleanly: the next connection at any working rate
+succeeds immediately after a failure. Avoid 1152000/2304000/4608000/5000000;
+use 2000000, 4000000 or 6000000.
 
 ### App-level UART test (root-causing the failing baud rates)
 
@@ -207,6 +208,31 @@ the adapter actually programmed.
 | 1152000, clk=XTAL | FAIL — total silence, 0 bytes | FAIL 0/5 | (same) |
 | 5000000, clk=APB/XTAL | FAIL — garbage received | FAIL 0/5 | none of 20 candidates ever framed |
 
+Cross test over 16 bauds x {APB, XTAL} (32 combinations, full-duplex
+print+echo per combination; a marker line at known-good 115200 lets the
+host follow each window in lockstep):
+
+| baud | APB | XTAL | | baud | APB | XTAL |
+| --- | --- | --- | --- | --- | --- | --- |
+| 57600 | PASS | PASS | | 1500000 | PASS | PASS |
+| 115200 | PASS | PASS | | 2000000 | PASS | PASS |
+| 230400 | PASS | PASS | | 2304000 | **FAIL** | **FAIL** |
+| 460800 | PASS | PASS | | 3000000 | PASS | PASS |
+| 921600 | PASS | PASS | | 4000000 | PASS | PASS |
+| 1000000 | PASS | PASS | | 4608000 | **FAIL** | **FAIL** |
+| 1152000 | **FAIL** | **FAIL** | | 5000000 | **FAIL** | **FAIL** |
+| 1200000 | PASS | PASS | | 6000000 | PASS | PASS |
+
+Every failure is identical: total silence in both directions (0 clean
+prints, 0 garbage bytes, 0/3 echoes), regardless of the ESP clock source.
+
+The failing set {1152000, 2304000, 4608000, 5000000} is telling: the first
+three are exact integer multiples (1152000 x1/x2/x4), which points at a
+broken prescaler/divider path in the CH343P baud generator for that
+frequency family; 5000000 is a separate broken setting. Everything else
+from 57600 to 6000000 — including direct neighbors 1000000/1200000 and
+4000000/6000000 — works perfectly on both clock sources.
+
 Conclusions:
 
 - **The esptool stub is innocent.** The app fails at exactly the same two
@@ -218,11 +244,12 @@ Conclusions:
   zero bytes (not even garbage), and nothing the host transmits is ever
   framed by the ESP at any of 20 candidate bauds. Host writes also appear
   to back up while the port is set to 1152000, i.e. the adapter's TX path
-  stalls.
-- **At the 5000000 setting the CH343P is alive but mis-clocked**: both
-  directions produce garbage, and the actual line rate matches none of the
-  20 standard candidate bauds.
+  stalls. The same dead-silent failure shows at 2304000 and 4608000 —
+  exact multiples of 1152000.
+- **At the 5000000 setting the CH343P does not produce a usable clock
+  either** — nothing the host sends is framed at any candidate baud; in one
+  run garbage was observed at the host, in later runs total silence.
 - This is a CH343P (firmware bcdDevice 4.45) baud-generator bug triggered
-  by the specific requested values 1152000 and 5000000. The esptool
-  failures at these rates (`No serial data received` right after
-  `Changed.`) are fully explained by it.
+  by specific requested values: 1152000 and its multiples 2304000/4608000,
+  plus 5000000. The esptool failures at these rates (`No serial data
+  received` right after `Changed.`) are fully explained by it.
