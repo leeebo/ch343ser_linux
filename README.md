@@ -20,6 +20,7 @@ VCP driver sources are kept in `driver/` for reference but are not needed.
   - [Auto-download (esptool DTR/RTS reset) test](#auto-download-esptool-dtrrts-reset-test)
   - [Flash write-speed vs. baud rate](#flash-write-speed-vs-baud-rate)
   - [Baud sweep (esptool `chip-id`, link check after baud change)](#baud-sweep-esptool-chip-id-link-check-after-baud-change)
+  - [App-level UART test (root-causing the failing baud rates)](#app-level-uart-test-root-causing-the-failing-baud-rates)
 
 ## USB descriptor configuration (CH343P only)
 
@@ -187,3 +188,41 @@ Linux `cdc_acm` link — i.e. the adapter mis-programs these two rates. The
 adapter recovers cleanly: the next connection at any working rate succeeds
 immediately after a failure. Avoid 1152000/5000000; use 2000000, 4000000
 or 6000000.
+
+### App-level UART test (root-causing the failing baud rates)
+
+To separate "esptool stub problem" from "adapter hardware/firmware
+problem", a dedicated test firmware (ESP-IDF app, console disabled, owns
+UART0 directly) was flashed to the S31. It cycles through {115200, 1152000,
+5000000} baud x {APB, XTAL} clock windows, printing a known counter message
+(ESP -> host) and echoing received bytes (host -> ESP). Two extra "scan"
+windows sweep the ESP's RX baud across 20 candidate rates (9600-6000000)
+while the host floods a probe string at the suspect setting, revealing what
+the adapter actually programmed.
+
+| host setting | ESP -> host (prints) | host -> ESP (echo) | scan: actual adapter baud |
+| --- | --- | --- | --- |
+| 115200 (control) | PASS | PASS 5/5 | — |
+| 1152000, clk=APB | FAIL — total silence, 0 bytes | FAIL 0/5 | none of 20 candidates ever framed |
+| 1152000, clk=XTAL | FAIL — total silence, 0 bytes | FAIL 0/5 | (same) |
+| 5000000, clk=APB/XTAL | FAIL — garbage received | FAIL 0/5 | none of 20 candidates ever framed |
+
+Conclusions:
+
+- **The esptool stub is innocent.** The app fails at exactly the same two
+  rates as the stub, even when its UART runs from APB at an essentially
+  exact baud (+0.01 %). The ESP32-S31 side — stub or app, XTAL or APB
+  clock — is not involved.
+- **At the 1152000 setting the CH343P's UART is effectively dead**: the app
+  transmits a perfectly good 1152000 signal and the host receives literally
+  zero bytes (not even garbage), and nothing the host transmits is ever
+  framed by the ESP at any of 20 candidate bauds. Host writes also appear
+  to back up while the port is set to 1152000, i.e. the adapter's TX path
+  stalls.
+- **At the 5000000 setting the CH343P is alive but mis-clocked**: both
+  directions produce garbage, and the actual line rate matches none of the
+  20 standard candidate bauds.
+- This is a CH343P (firmware bcdDevice 4.45) baud-generator bug triggered
+  by the specific requested values 1152000 and 5000000. The esptool
+  failures at these rates (`No serial data received` right after
+  `Changed.`) are fully explained by it.
