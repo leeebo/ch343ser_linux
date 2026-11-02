@@ -19,6 +19,7 @@ VCP driver sources are kept in `driver/` for reference but are not needed.
   - [Environment](#environment)
   - [Auto-download (esptool DTR/RTS reset) test](#auto-download-esptool-dtrrts-reset-test)
   - [Flash write-speed vs. baud rate](#flash-write-speed-vs-baud-rate)
+  - [Baud sweep (esptool `chip-id`, link check after baud change)](#baud-sweep-esptool-chip-id-link-check-after-baud-change)
 
 ## USB descriptor configuration (CH343P only)
 
@@ -137,6 +138,7 @@ connect, stub upload, verify and reset.
 | baud | runs | result | write time (s) | effective speed (kbit/s) |
 | --- | --- | --- | --- | --- |
 | 6000000 | 3 | 3/3 PASS | 54.1 / 53.6 / 53.7 | 1240.9 / 1251.2 / 1250.0 |
+| 5000000 | 1 | 0/1 FAIL | — | — |
 | 4000000 | 3 | 3/3 PASS | 49.5 / 59.3 / 58.3 | 1355.9 / 1131.8 / 1151.3 |
 | 2000000 | 2 | 2/2 PASS | 76.1 / 75.5 | 881.4 / 888.6 |
 | 1152000 | 3 | 0/3 FAIL | — | — |
@@ -151,11 +153,37 @@ Findings:
   throughput saturates around 1.2-1.35 Mbit/s no matter how high the baud
   goes. 2000000 is the most robust "fast" setting; 4000000/6000000 are
   equally usable if you want the headline number.
-- **1152000 does not work on this link** — deterministic failure right after
-  `Changing baud rate to 1152000... Changed.`, the stub then cannot be
-  reached (`Unable to verify flash chip connection`). Notably 6000000 — also
-  a non-integer divider from the 40 MHz XTAL (6.67, ≈ -0.3 % with the
-  fractional divider) — works fine, so a plain crystal-divider mismatch on
-  the ESP side does not explain it; the failure is specific to the 1152000
-  setting on this CH343P + cdc_acm link. Use 2000000 or 4000000 instead —
-  both are faster in practice anyway.
+- **1152000 and 5000000 do not work on this link** — deterministic failure
+  right after `Changing baud rate to ... Changed.`, the stub then cannot be
+  reached (`No serial data received` / `Unable to verify flash chip
+  connection`). See the sweep below.
+
+### Baud sweep (esptool `chip-id`, link check after baud change)
+
+Each rate was also probed with `esptool -b <baud> chip-id`, which switches
+the stub flasher to the requested baud and immediately talks to it — a fast
+link-quality check without writing flash. Failing rates were re-run to
+confirm determinism.
+
+| baud | result | 40 MHz XTAL divider | ESP-side error |
+| --- | --- | --- | --- |
+| 460800 | PASS | 86.81 | -0.01 % |
+| 921600 | PASS | 43.41 | -0.05 % |
+| 1000000 | PASS | 40.0 (exact) | 0 % |
+| 1152000 | FAIL (deterministic, 8/8) | 34.72 | +0.10 % |
+| 1200000 | PASS | 33.33 | +0.06 % |
+| 1500000 | PASS | 26.67 | -0.09 % |
+| 2000000 | PASS | 20.0 (exact) | 0 % |
+| 3000000 | PASS | 13.33 | +0.16 % |
+| 4000000 | PASS | 10.0 (exact) | 0 % |
+| 5000000 | FAIL (deterministic, 4/4) | 8.0 (exact) | 0 % |
+| 6000000 | PASS | 6.67 | -0.31 % |
+
+An ESP-side crystal-divider mismatch is **ruled out** as the root cause:
+5000000 divides the 40 MHz XTAL exactly yet always fails, while 6000000
+(-0.31 %) and 3000000 (+0.16 %) pass. The failures are specific to the
+1152000 and 5000000 settings on this CH343P (firmware bcdDevice 4.45) +
+Linux `cdc_acm` link — i.e. the adapter mis-programs these two rates. The
+adapter recovers cleanly: the next connection at any working rate succeeds
+immediately after a failure. Avoid 1152000/5000000; use 2000000, 4000000
+or 6000000.
